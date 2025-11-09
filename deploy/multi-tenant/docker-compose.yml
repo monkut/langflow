@@ -1,0 +1,125 @@
+services:
+  langflow:
+    build:
+      context: ../..
+      dockerfile: deploy/multi-tenant/Dockerfile
+    container_name: langflow-multi-tenant
+    ports:
+      - "7860:7860"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database Configuration (matching AWS)
+      - LANGFLOW_DATABASE_URL=postgresql://postgres:WCwWChdEr5J2pbE0RHs4pXqct43Bym@postgres:5432/langflow
+      - LANGFLOW_DATABASE_CONNECTION_RETRY=true
+
+      # Data Directory
+      - LANGFLOW_CONFIG_DIR=/app/data
+
+      # Authentication (matching AWS)
+      - LANGFLOW_AUTO_LOGIN=false
+      - LANGFLOW_SUPERUSER=admin
+      - LANGFLOW_SUPERUSER_PASSWORD=WCwWChdEr5J2pbE0RHs4pXqct43Bym
+
+      # Logging (matching AWS)
+      - LANGFLOW_LOG_LEVEL=info
+      # Note: File logging disabled - containers log to stdout/stderr
+
+      # Performance (matching AWS)
+      - LANGFLOW_WORKERS=1
+
+      # Database Connection Pool Settings (matching AWS)
+      - LANGFLOW_POOL_SIZE=20
+      - LANGFLOW_MAX_OVERFLOW=30
+
+      # CORS Settings (adjust for your deployment)
+      - LANGFLOW_CORS_ORIGINS=*
+      - LANGFLOW_CORS_ALLOW_CREDENTIALS=true
+
+    volumes:
+      # Note: /app/data not mounted for local testing (ephemeral)
+      - ./init-scripts:/app/init-scripts:ro
+    networks:
+      - langflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: langflow-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: WCwWChdEr5J2pbE0RHs4pXqct43Bym
+      POSTGRES_DB: langflow
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      # Performance tuning for multi-tenant workload
+      POSTGRES_MAX_CONNECTIONS: 200
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - langflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "default_statistics_target=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "work_mem=1MB"
+      - "-c"
+      - "min_wal_size=1GB"
+      - "-c"
+      - "max_wal_size=4GB"
+
+  # Optional: Nginx reverse proxy for URL-based tenant routing
+  nginx:
+    image: nginx:alpine
+    container_name: langflow-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - langflow
+    networks:
+      - langflow-network
+    restart: unless-stopped
+
+networks:
+  langflow-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local

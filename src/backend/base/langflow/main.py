@@ -33,7 +33,7 @@ from langflow.initial_setup.setup import (
     load_flows_from_directory,
     sync_flows_from_fs,
 )
-from langflow.middleware import ContentSizeLimitMiddleware
+from langflow.middleware import ContentSizeLimitMiddleware, TenantSchemaMiddleware
 from langflow.services.deps import get_queue_service, get_service, get_settings_service, get_telemetry_service
 from langflow.services.schema import ServiceType
 from langflow.services.utils import initialize_services, initialize_settings_service, teardown_services
@@ -363,6 +363,9 @@ def create_app():
     )
     app.add_middleware(
         ContentSizeLimitMiddleware,
+    )
+    app.add_middleware(
+        TenantSchemaMiddleware,
     )
 
     setup_sentry(app)
