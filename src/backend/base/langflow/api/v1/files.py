@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from lfx.services.settings.service import SettingsService
 from lfx.utils.helpers import build_content_type_from_extension
@@ -41,6 +41,7 @@ async def get_flow(
 async def upload_file(
     *,
     file: UploadFile,
+    request: Request,
     flow: Annotated[Flow, Depends(get_flow)],
     current_user: CurrentActiveUser,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
@@ -59,13 +60,16 @@ async def upload_file(
     if flow.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="You don't have access to this flow")
 
+    # Extract tenant schema from request state (set by tenant middleware)
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
         file_content = await file.read()
         timestamp = datetime.now(tz=timezone.utc).astimezone().strftime("%Y-%m-%d_%H-%M-%S")
         file_name = file.filename or hashlib.sha256(file_content).hexdigest()
         full_file_name = f"{timestamp}_{file_name}"
         folder = str(flow.id)
-        await storage_service.save_file(flow_id=folder, file_name=full_file_name, data=file_content)
+        await storage_service.save_file(flow_id=folder, file_name=full_file_name, data=file_content, schema_name=schema_name)
         return UploadFileResponse(flow_id=str(flow.id), file_path=f"{folder}/{full_file_name}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -73,7 +77,7 @@ async def upload_file(
 
 @router.get("/download/{flow_id}/{file_name}")
 async def download_file(
-    file_name: str, flow_id: UUID, storage_service: Annotated[StorageService, Depends(get_storage_service)]
+    file_name: str, flow_id: UUID, request: Request, storage_service: Annotated[StorageService, Depends(get_storage_service)]
 ):
     flow_id_str = str(flow_id)
     extension = file_name.split(".")[-1]
@@ -88,8 +92,11 @@ async def download_file(
     if not content_type:
         raise HTTPException(status_code=500, detail=f"Content type not found for extension {extension}")
 
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
-        file_content = await storage_service.get_file(flow_id=flow_id_str, file_name=file_name)
+        file_content = await storage_service.get_file(flow_id=flow_id_str, file_name=file_name, schema_name=schema_name)
         headers = {
             "Content-Disposition": f"attachment; filename={file_name} filename*=UTF-8''{file_name}",
             "Content-Type": "application/octet-stream",
@@ -101,7 +108,7 @@ async def download_file(
 
 
 @router.get("/images/{flow_id}/{file_name}")
-async def download_image(file_name: str, flow_id: UUID):
+async def download_image(file_name: str, flow_id: UUID, request: Request):
     storage_service = get_storage_service()
     extension = file_name.split(".")[-1]
     flow_id_str = str(flow_id)
@@ -118,8 +125,11 @@ async def download_image(file_name: str, flow_id: UUID):
     if not content_type.startswith("image"):
         raise HTTPException(status_code=500, detail=f"Content type {content_type} is not an image")
 
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
-        file_content = await storage_service.get_file(flow_id=flow_id_str, file_name=file_name)
+        file_content = await storage_service.get_file(flow_id=flow_id_str, file_name=file_name, schema_name=schema_name)
         return StreamingResponse(BytesIO(file_content), media_type=content_type)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -168,11 +178,15 @@ async def list_profile_pictures():
 
 @router.get("/list/{flow_id}")
 async def list_files(
+    request: Request,
     flow: Annotated[Flow, Depends(get_flow)],
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
-        files = await storage_service.list_files(flow_id=str(flow.id))
+        files = await storage_service.list_files(flow_id=str(flow.id), schema_name=schema_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -182,11 +196,15 @@ async def list_files(
 @router.delete("/delete/{flow_id}/{file_name}")
 async def delete_file(
     file_name: str,
+    request: Request,
     flow: Annotated[Flow, Depends(get_flow)],
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
-        await storage_service.delete_file(flow_id=str(flow.id), file_name=file_name)
+        await storage_service.delete_file(flow_id=str(flow.id), file_name=file_name, schema_name=schema_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 

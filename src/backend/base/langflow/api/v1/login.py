@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from langflow.api.utils import DbSession
 from langflow.api.v1.schemas import Token
@@ -16,6 +17,7 @@ from langflow.services.auth.utils import (
 )
 from langflow.services.database.models.user.crud import get_user_by_id
 from langflow.services.deps import get_settings_service, get_variable_service
+from langflow.services.deps_tenant import get_tenant_aware_session
 
 router = APIRouter(tags=["Login"])
 
@@ -24,7 +26,7 @@ router = APIRouter(tags=["Login"])
 async def login_to_get_access_token(
     response: Response,
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
-    db: DbSession,
+    db: Annotated[AsyncSession, Depends(get_tenant_aware_session)],
 ):
     auth_settings = get_settings_service().auth_settings
     try:

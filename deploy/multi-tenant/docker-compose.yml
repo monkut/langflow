@@ -1,0 +1,139 @@
+services:
+  langflow:
+    build:
+      context: ../..
+      dockerfile: deploy/multi-tenant/Dockerfile
+    container_name: langflow-multi-tenant
+    ports:
+      - "7860:7860"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    environment:
+      # Database Configuration (matching AWS)
+      - LANGFLOW_DATABASE_URL=postgresql://postgres:WCwWChdEr5J2pbE0RHs4pXqct43Bym@postgres:5432/langflow
+      - LANGFLOW_DATABASE_CONNECTION_RETRY=true
+
+      # Data Directory
+      - LANGFLOW_CONFIG_DIR=/app/data
+
+      # Storage Configuration (S3 via LocalStack)
+      - LANGFLOW_STORAGE_TYPE=s3
+      - LANGFLOW_S3_BUCKET_NAME=langflow-be1bbb25-dev-files
+      - LANGFLOW_S3_REGION_NAME=ap-northeast-1
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+
+      # Authentication (matching AWS)
+      - LANGFLOW_AUTO_LOGIN=false
+      - LANGFLOW_SUPERUSER=admin
+      - LANGFLOW_SUPERUSER_PASSWORD=WCwWChdEr5J2pbE0RHs4pXqct43Bym
+
+      # Logging (matching AWS)
+      - LANGFLOW_LOG_LEVEL=info
+      # Note: File logging disabled - containers log to stdout/stderr
+
+      # Performance (matching AWS)
+      - LANGFLOW_WORKERS=1
+
+      # Database Connection Pool Settings (matching AWS)
+      - LANGFLOW_POOL_SIZE=20
+      - LANGFLOW_MAX_OVERFLOW=30
+
+      # CORS Settings (adjust for your deployment)
+      - LANGFLOW_CORS_ORIGINS=*
+      - LANGFLOW_CORS_ALLOW_CREDENTIALS=true
+
+    # Note: No volumes mounted for local testing (ephemeral /app/data)
+    # Add volumes here if needed for local development
+    networks:
+      - langflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: langflow-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: WCwWChdEr5J2pbE0RHs4pXqct43Bym
+      POSTGRES_DB: langflow
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      # Performance tuning for multi-tenant workload
+      POSTGRES_MAX_CONNECTIONS: 200
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - langflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "default_statistics_target=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "work_mem=1MB"
+      - "-c"
+      - "min_wal_size=1GB"
+      - "-c"
+      - "max_wal_size=4GB"
+
+  localstack:
+    image: localstack/localstack:latest
+    container_name: langflow-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=1
+      - AWS_DEFAULT_REGION=ap-northeast-1
+    volumes:
+      - ./localstack-init:/etc/localstack/init/ready.d:ro
+    networks:
+      - langflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "awslocal", "s3", "ls"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  langflow-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local

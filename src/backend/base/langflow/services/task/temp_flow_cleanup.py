@@ -47,19 +47,18 @@ async def cleanup_orphaned_records() -> None:
                     await session.exec(delete(table).where(col(table.flow_id).in_(orphaned_flow_ids)))
 
                     # Clean up any associated storage files
+                    # Note: schema_name is None for orphaned records since we can't determine the schema
                     storage_service: StorageService = get_storage_service()
                     for flow_id in orphaned_flow_ids:
                         try:
-                            files = await storage_service.list_files(str(flow_id))
+                            files = await storage_service.list_files(str(flow_id), schema_name=None)
                             for file in files:
                                 try:
-                                    await storage_service.delete_file(str(flow_id), file)
+                                    await storage_service.delete_file(str(flow_id), file, schema_name=None)
                                 except Exception as exc:  # noqa: BLE001
                                     logger.error(f"Failed to delete file {file} for flow {flow_id}: {exc!s}")
-                            # Delete the flow directory after all files are deleted
-                            flow_dir = storage_service.data_dir / str(flow_id)
-                            if await flow_dir.exists():
-                                await flow_dir.rmdir()
+                            # Note: Directory cleanup is handled by storage service implementation
+                            # Direct filesystem operations removed as they don't work with S3 storage
                         except Exception as exc:  # noqa: BLE001
                             logger.error(f"Failed to list files for flow {flow_id}: {exc!s}")
 

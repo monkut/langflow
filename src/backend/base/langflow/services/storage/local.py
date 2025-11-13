@@ -13,24 +13,32 @@ class LocalStorageService(StorageService):
         super().__init__(session_service, settings_service)
         self.set_ready()
 
-    def build_full_path(self, flow_id: str, file_name: str) -> str:
-        """Build the full path of a file in the local storage."""
+    def build_full_path(self, flow_id: str, file_name: str, schema_name: str | None = None) -> str:
+        """Build the full path of a file in the local storage with optional schema prefix."""
+        if schema_name:
+            # Multi-tenant: /app/data/{schema}/{user_id}/{filename}
+            return str(self.data_dir / schema_name / flow_id / file_name)
+        # Legacy/single-tenant: /app/data/{user_id}/{filename}
         return str(self.data_dir / flow_id / file_name)
 
-    async def save_file(self, flow_id: str, file_name: str, data: bytes) -> None:
+    async def save_file(self, flow_id: str, file_name: str, data: bytes, schema_name: str | None = None) -> None:
         """Save a file in the local storage.
 
         Args:
             flow_id: The identifier for the flow.
             file_name: The name of the file to be saved.
             data: The byte content of the file.
+            schema_name: Optional schema name for multi-tenant isolation.
 
         Raises:
             FileNotFoundError: If the specified flow does not exist.
             IsADirectoryError: If the file name is a directory.
             PermissionError: If there is no permission to write the file.
         """
-        folder_path = self.data_dir / flow_id
+        if schema_name:
+            folder_path = self.data_dir / schema_name / flow_id
+        else:
+            folder_path = self.data_dir / flow_id
         await folder_path.mkdir(parents=True, exist_ok=True)
         file_path = folder_path / file_name
 
@@ -42,12 +50,13 @@ class LocalStorageService(StorageService):
             logger.exception(f"Error saving file {file_name} in flow {flow_id}")
             raise
 
-    async def get_file(self, flow_id: str, file_name: str) -> bytes:
+    async def get_file(self, flow_id: str, file_name: str, schema_name: str | None = None) -> bytes:
         """Retrieve a file from the local storage.
 
         Args:
             flow_id: The identifier for the flow.
             file_name: The name of the file to be retrieved.
+            schema_name: Optional schema name for multi-tenant isolation.
 
         Returns:
             The byte content of the file.
@@ -55,7 +64,10 @@ class LocalStorageService(StorageService):
         Raises:
             FileNotFoundError: If the file does not exist.
         """
-        file_path = self.data_dir / flow_id / file_name
+        if schema_name:
+            file_path = self.data_dir / schema_name / flow_id / file_name
+        else:
+            file_path = self.data_dir / flow_id / file_name
         if not await file_path.exists():
             await logger.awarning(f"File {file_name} not found in flow {flow_id}.")
             msg = f"File {file_name} not found in flow {flow_id}"
@@ -67,11 +79,12 @@ class LocalStorageService(StorageService):
         logger.debug(f"File {file_name} retrieved successfully from flow {flow_id}.")
         return content
 
-    async def list_files(self, flow_id: str):
+    async def list_files(self, flow_id: str, schema_name: str | None = None):
         """List all files in a specified flow.
 
         Args:
             flow_id: The identifier for the flow.
+            schema_name: Optional schema name for multi-tenant isolation.
 
         Returns:
             A list of file names.
@@ -81,7 +94,10 @@ class LocalStorageService(StorageService):
         """
         if not isinstance(flow_id, str):
             flow_id = str(flow_id)
-        folder_path = self.data_dir / flow_id
+        if schema_name:
+            folder_path = self.data_dir / schema_name / flow_id
+        else:
+            folder_path = self.data_dir / flow_id
         if not await folder_path.exists() or not await folder_path.is_dir():
             await logger.awarning(f"Flow {flow_id} directory does not exist.")
             msg = f"Flow {flow_id} directory does not exist."
@@ -96,13 +112,17 @@ class LocalStorageService(StorageService):
         await logger.ainfo(f"Listed {len(files)} files in flow {flow_id}.")
         return files
 
-    async def delete_file(self, flow_id: str, file_name: str) -> None:
+    async def delete_file(self, flow_id: str, file_name: str, schema_name: str | None = None) -> None:
         """Delete a file from the local storage.
 
         :param flow_id: The identifier for the flow.
         :param file_name: The name of the file to be deleted.
+        :param schema_name: Optional schema name for multi-tenant isolation.
         """
-        file_path = self.data_dir / flow_id / file_name
+        if schema_name:
+            file_path = self.data_dir / schema_name / flow_id / file_name
+        else:
+            file_path = self.data_dir / flow_id / file_name
         if await file_path.exists():
             await file_path.unlink()
             await logger.ainfo(f"File {file_name} deleted successfully from flow {flow_id}.")
@@ -113,10 +133,19 @@ class LocalStorageService(StorageService):
         """Perform any cleanup operations when the service is being torn down."""
         # No specific teardown actions required for local
 
-    async def get_file_size(self, flow_id: str, file_name: str):
-        """Get the size of a file in the local storage."""
+    async def get_file_size(self, flow_id: str, file_name: str, schema_name: str | None = None):
+        """Get the size of a file in the local storage.
+
+        Args:
+            flow_id: The identifier for the flow.
+            file_name: The name of the file.
+            schema_name: Optional schema name for multi-tenant isolation.
+        """
         # Get the file size from the file path
-        file_path = self.data_dir / flow_id / file_name
+        if schema_name:
+            file_path = self.data_dir / schema_name / flow_id / file_name
+        else:
+            file_path = self.data_dir / flow_id / file_name
         if not await file_path.exists():
             await logger.awarning(f"File {file_name} not found in flow {flow_id}.")
             msg = f"File {file_name} not found in flow {flow_id}"

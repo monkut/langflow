@@ -1043,12 +1043,21 @@ async def get_or_create_default_folder(session: AsyncSession, user_id: UUID) -> 
     Returns:
         FolderRead: The default folder for the user.
     """
+    await logger.adebug(f"get_or_create_default_folder called for user_id={user_id}")
+
     # First, check if the current default folder exists
     stmt = select(Folder).where(Folder.user_id == user_id, Folder.name == DEFAULT_FOLDER_NAME)
-    result = await session.exec(stmt)
-    folder = result.first()
-    if folder:
-        return FolderRead.model_validate(folder, from_attributes=True)
+    try:
+        result = await session.exec(stmt)
+        folder = result.first()
+        if folder:
+            await logger.adebug(f"Found existing default folder for user {user_id}")
+            return FolderRead.model_validate(folder, from_attributes=True)
+    except Exception as e:
+        await logger.aerror(f"Error checking for existing folder: {e!s}, type={type(e).__name__}")
+        raise
+
+    await logger.adebug(f"No existing default folder found for user {user_id}, attempting to create")
 
     # Check if a legacy folder exists and migrate it if the name is different from default
     if DEFAULT_FOLDER_NAME not in LEGACY_FOLDER_NAMES:
@@ -1057,8 +1066,12 @@ async def get_or_create_default_folder(session: AsyncSession, user_id: UUID) -> 
                 continue  # Skip if legacy name is the same as current default
 
             legacy_stmt = select(Folder).where(Folder.user_id == user_id, Folder.name == legacy_name)
-            legacy_result = await session.exec(legacy_stmt)
-            legacy_folder = legacy_result.first()
+            try:
+                legacy_result = await session.exec(legacy_stmt)
+                legacy_folder = legacy_result.first()
+            except Exception as e:
+                await logger.aerror(f"Error checking legacy folder '{legacy_name}': {e!s}, type={type(e).__name__}")
+                raise
 
             if legacy_folder:
                 # Migrate the legacy folder by renaming it
@@ -1072,25 +1085,42 @@ async def get_or_create_default_folder(session: AsyncSession, user_id: UUID) -> 
                     await session.commit()
                     await session.refresh(legacy_folder)
                     return FolderRead.model_validate(legacy_folder, from_attributes=True)
-                except sa.exc.IntegrityError:
+                except sa.exc.IntegrityError as e:
                     # If there's a conflict, rollback and proceed to create new folder
+                    await logger.awarning(f"IntegrityError migrating legacy folder: {e!s}")
                     await session.rollback()
                     break
+                except Exception as e:
+                    await logger.aerror(f"Error migrating legacy folder: {e!s}, type={type(e).__name__}")
+                    await session.rollback()
+                    raise
 
     # If no existing folder found, create a new one
     try:
+        await logger.adebug(f"Creating new folder for user {user_id}: name={DEFAULT_FOLDER_NAME}")
         folder_obj = Folder(user_id=user_id, name=DEFAULT_FOLDER_NAME, description=DEFAULT_FOLDER_DESCRIPTION)
         session.add(folder_obj)
+        await logger.adebug("Folder object added to session, committing...")
         await session.commit()
+        await logger.adebug("Commit successful, refreshing folder object...")
         await session.refresh(folder_obj)
+        await logger.adebug(f"Folder created successfully with id={folder_obj.id}")
     except sa.exc.IntegrityError as e:
         # Another worker may have created the folder concurrently.
+        await logger.awarning(f"IntegrityError creating folder (concurrent creation?): {e!s}")
         await session.rollback()
         result = await session.exec(stmt)
         folder = result.first()
         if folder:
+            await logger.adebug("Found folder after IntegrityError, returning it")
             return FolderRead.model_validate(folder, from_attributes=True)
-        msg = "Failed to get or create default folder"
+        msg = f"Failed to get or create default folder after IntegrityError: {e!s}"
+        await logger.aerror(msg)
+        raise ValueError(msg) from e
+    except Exception as e:
+        await logger.aerror(f"Unexpected error creating folder: {e!s}, type={type(e).__name__}")
+        await session.rollback()
+        msg = f"Failed to create default folder: {e!s}"
         raise ValueError(msg) from e
     return FolderRead.model_validate(folder_obj, from_attributes=True)
 
