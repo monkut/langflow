@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from lfx.log.logger import logger
 from sqlmodel import col, select
@@ -69,7 +69,9 @@ async def fetch_file_object(file_id: uuid.UUID, current_user: CurrentActiveUser,
     return file
 
 
-async def save_file_routine(file, storage_service, current_user: CurrentActiveUser, file_content=None, file_name=None):
+async def save_file_routine(
+    file, storage_service, current_user: CurrentActiveUser, file_content=None, file_name=None, schema_name=None
+):
     """Routine to save the file content to the storage service."""
     file_id = uuid.uuid4()
 
@@ -78,8 +80,10 @@ async def save_file_routine(file, storage_service, current_user: CurrentActiveUs
     if not file_name:
         file_name = file.filename
 
-    # Save the file using the storage service.
-    await storage_service.save_file(flow_id=str(current_user.id), file_name=file_name, data=file_content)
+    # Save the file using the storage service with schema isolation.
+    await storage_service.save_file(
+        flow_id=str(current_user.id), file_name=file_name, data=file_content, schema_name=schema_name
+    )
 
     return file_id, file_name
 
@@ -88,12 +92,16 @@ async def save_file_routine(file, storage_service, current_user: CurrentActiveUs
 @router.post("/", status_code=HTTPStatus.CREATED)
 async def upload_user_file(
     file: Annotated[UploadFile, File(...)],
+    request: Request,
     session: DbSession,
     current_user: CurrentActiveUser,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
     settings_service: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> UploadFileResponse:
     """Upload a file for the current user and track it in the database."""
+    # Extract tenant schema from request state (set by tenant middleware)
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     # Get the max allowed file size from settings (in MB)
     try:
         max_file_size_upload = settings_service.settings.max_file_size_upload
@@ -156,15 +164,14 @@ async def upload_user_file(
         # Read file content and save with unique filename
         try:
             file_id, stored_file_name = await save_file_routine(
-                file, storage_service, current_user, file_name=unique_filename
+                file, storage_service, current_user, file_name=unique_filename, schema_name=schema_name
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error saving file: {e}") from e
 
         # Compute the file size based on the path
         file_size = await storage_service.get_file_size(
-            flow_id=str(current_user.id),
-            file_name=stored_file_name,
+            flow_id=str(current_user.id), file_name=stored_file_name, schema_name=schema_name
         )
 
         # Create a new file record
@@ -202,7 +209,9 @@ async def get_file_by_name(
         raise HTTPException(status_code=500, detail=f"Error fetching file: {e}") from e
 
 
-async def load_sample_files(current_user: CurrentActiveUser, session: DbSession, storage_service: StorageService):
+async def load_sample_files(
+    current_user: CurrentActiveUser, session: DbSession, storage_service: StorageService, schema_name: str | None = None
+):
     # Check if the sample files in the SAMPLE_DATA_DIR exist
     for sample_file_path in Path(SAMPLE_DATA_DIR).iterdir():
         sample_file_name = sample_file_path.name
@@ -225,10 +234,10 @@ async def load_sample_files(current_user: CurrentActiveUser, session: DbSession,
             current_user,
             file_content=binary_data,
             file_name=sample_file_name,
+            schema_name=schema_name,
         )
         file_size = await storage_service.get_file_size(
-            flow_id=str(current_user.id),
-            file_name=sample_file_name,
+            flow_id=str(current_user.id), file_name=sample_file_name, schema_name=schema_name
         )
         # Create a UserFile object for the sample file
         sample_file = UserFile(
@@ -274,11 +283,15 @@ async def list_files(
 @router.delete("/batch/", status_code=HTTPStatus.OK)
 async def delete_files_batch(
     file_ids: list[uuid.UUID],
+    request: Request,
     current_user: CurrentActiveUser,
     session: DbSession,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
     """Delete multiple files by their IDs."""
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
         # Fetch all files from the DB
         stmt = select(UserFile).where(col(UserFile.id).in_(file_ids), col(UserFile.user_id) == current_user.id)
@@ -290,7 +303,7 @@ async def delete_files_batch(
 
         # Delete all files from the storage service
         for file in files:
-            await storage_service.delete_file(flow_id=str(current_user.id), file_name=file.path)
+            await storage_service.delete_file(flow_id=str(current_user.id), file_name=file.path, schema_name=schema_name)
             await session.delete(file)
 
         # Delete all files from the database
@@ -306,11 +319,15 @@ async def delete_files_batch(
 @router.post("/batch/", status_code=HTTPStatus.OK)
 async def download_files_batch(
     file_ids: list[uuid.UUID],
+    request: Request,
     current_user: CurrentActiveUser,
     session: DbSession,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
     """Download multiple files as a zip file by their IDs."""
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
         # Fetch all files from the DB
         stmt = select(UserFile).where(col(UserFile.id).in_(file_ids), col(UserFile.user_id) == current_user.id)
@@ -328,7 +345,7 @@ async def download_files_batch(
             for file in files:
                 # Get the file content from storage
                 file_content = await storage_service.get_file(
-                    flow_id=str(current_user.id), file_name=file.path.split("/")[-1]
+                    flow_id=str(current_user.id), file_name=file.path.split("/")[-1], schema_name=schema_name
                 )
 
                 # Get the file extension from the original filename
@@ -395,6 +412,7 @@ async def read_file_content(file_stream: AsyncIterable[bytes] | bytes, *, decode
 @router.get("/{file_id}")
 async def download_file(
     file_id: uuid.UUID,
+    request: Request,
     current_user: CurrentActiveUser,
     session: DbSession,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
@@ -405,6 +423,7 @@ async def download_file(
 
     Args:
         file_id: UUID of the file.
+        request: FastAPI request object.
         current_user: Authenticated user.
         session: Database session.
         storage_service: File storage service.
@@ -413,6 +432,9 @@ async def download_file(
     Returns:
         StreamingResponse for client downloads or str for internal use.
     """
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
         # Fetch the file from the DB
         file = await fetch_file_object(file_id, current_user, session)
@@ -423,7 +445,9 @@ async def download_file(
         file_name = file.path.split("/")[-1]
 
         # Get file stream
-        file_stream = await storage_service.get_file(flow_id=str(current_user.id), file_name=file_name)
+        file_stream = await storage_service.get_file(
+            flow_id=str(current_user.id), file_name=file_name, schema_name=schema_name
+        )
 
         if file_stream is None:
             raise HTTPException(status_code=404, detail="File stream not available")
@@ -476,11 +500,15 @@ async def edit_file_name(
 @router.delete("/{file_id}")
 async def delete_file(
     file_id: uuid.UUID,
+    request: Request,
     current_user: CurrentActiveUser,
     session: DbSession,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
     """Delete a file by its ID."""
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
         # Fetch the file object
         file_to_delete = await fetch_file_object(file_id, current_user, session)
@@ -488,7 +516,9 @@ async def delete_file(
             raise HTTPException(status_code=404, detail="File not found")
 
         # Delete the file from the storage service
-        await storage_service.delete_file(flow_id=str(current_user.id), file_name=file_to_delete.path)
+        await storage_service.delete_file(
+            flow_id=str(current_user.id), file_name=file_to_delete.path, schema_name=schema_name
+        )
 
         # Delete from the database
         await session.delete(file_to_delete)
@@ -507,11 +537,15 @@ async def delete_file(
 @router.delete("")
 @router.delete("/", status_code=HTTPStatus.OK)
 async def delete_all_files(
+    request: Request,
     current_user: CurrentActiveUser,
     session: DbSession,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
     """Delete all files for the current user."""
+    # Extract tenant schema from request state
+    schema_name = getattr(request.state, "tenant_schema", None)
+
     try:
         # Fetch all files from the DB
         stmt = select(UserFile).where(UserFile.user_id == current_user.id)
@@ -520,7 +554,7 @@ async def delete_all_files(
 
         # Delete all files from the storage service
         for file in files:
-            await storage_service.delete_file(flow_id=str(current_user.id), file_name=file.path)
+            await storage_service.delete_file(flow_id=str(current_user.id), file_name=file.path, schema_name=schema_name)
             await session.delete(file)
 
         # Delete all files from the database

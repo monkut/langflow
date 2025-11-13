@@ -138,6 +138,7 @@ dependencies = [
     "agent-lifecycle-toolkit",
     "astrapy>=2.1.0,<3.0.0",
     "psycopg>=3.2.12",
+    "aioboto3>=15.5.0",
 ]
 
 

@@ -48,8 +48,16 @@ class TenantSchemaMiddleware(BaseHTTPMiddleware):
             tenant_prefix = match.group(1)
             request.state.tenant_prefix = tenant_prefix
 
+            # Rewrite the URL path to remove the tenant prefix
+            # Example: /tenant/acme/api/v1/flows -> /api/v1/flows
+            original_path = request.url.path
+            new_path = original_path.replace(f"/tenant/{tenant_prefix}", "", 1)
+
+            # Update the request scope with the rewritten path
+            request.scope["path"] = new_path
+
             if not self._logged_init:
-                await logger.adebug(f"Tenant middleware initialized, extracted prefix: {tenant_prefix}")
+                await logger.adebug(f"Tenant middleware initialized, extracted prefix: {tenant_prefix}, rewrote path: {original_path} -> {new_path}")
                 self._logged_init = True
         else:
             # No tenant prefix in URL, use public schema

@@ -187,6 +187,10 @@ class Settings(BaseSettings):
     like_webhook_url: str | None = "https://api.langflow.store/flows/trigger/64275852-ec00-45c1-984e-3bff814732da"
 
     storage_type: str = "local"
+    s3_bucket_name: str | None = None
+    """S3 bucket name for file storage when storage_type is 's3'."""
+    s3_region_name: str = "ap-northeast-1"
+    """AWS region for S3 bucket."""
 
     celery_enabled: bool = False
 

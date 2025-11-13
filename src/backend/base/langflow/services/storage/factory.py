@@ -23,7 +23,18 @@ class StorageServiceFactory(ServiceFactory):
         if storage_type.lower() == "s3":
             from .s3 import S3StorageService
 
-            return S3StorageService(session_service, settings_service)
+            bucket_name = settings_service.settings.s3_bucket_name
+            if not bucket_name:
+                msg = "S3 storage type requires LANGFLOW_S3_BUCKET_NAME to be set"
+                raise ValueError(msg)
+
+            region_name = settings_service.settings.s3_region_name
+            return S3StorageService(
+                session_service=session_service,
+                settings_service=settings_service,
+                bucket_name=bucket_name,
+                region_name=region_name,
+            )
         logger.warning(f"Storage type {storage_type} not supported. Using local storage.")
         from .local import LocalStorageService
 

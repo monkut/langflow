@@ -73,11 +73,12 @@ def get_mcp_config():
     return MCPConfig()
 
 
-async def handle_list_resources(project_id=None):
+async def handle_list_resources(project_id=None, schema_name: str | None = None):
     """Handle listing resources for MCP.
 
     Args:
         project_id: Optional project ID to filter resources by project
+        schema_name: Optional schema name for multi-tenant isolation
     """
     resources = []
     try:
@@ -99,7 +100,7 @@ async def handle_list_resources(project_id=None):
             for flow in flows:
                 if flow.id:
                     try:
-                        files = await storage_service.list_files(flow_id=str(flow.id))
+                        files = await storage_service.list_files(flow_id=str(flow.id), schema_name=schema_name)
                         for file_name in files:
                             # URL encode the filename
                             safe_filename = quote(file_name)
@@ -121,8 +122,13 @@ async def handle_list_resources(project_id=None):
     return resources
 
 
-async def handle_read_resource(uri: str) -> bytes:
-    """Handle resource read requests."""
+async def handle_read_resource(uri: str, schema_name: str | None = None) -> bytes:
+    """Handle resource read requests.
+
+    Args:
+        uri: The resource URI to read
+        schema_name: Optional schema name for multi-tenant isolation
+    """
     try:
         # Parse the URI properly
         parsed_uri = urlparse(str(uri))
@@ -143,7 +149,7 @@ async def handle_read_resource(uri: str) -> bytes:
         storage_service = get_storage_service()
 
         # Read the file content
-        content = await storage_service.get_file(flow_id=flow_id, file_name=filename)
+        content = await storage_service.get_file(flow_id=flow_id, file_name=filename, schema_name=schema_name)
         if not content:
             msg = f"File {filename} not found in flow {flow_id}"
             raise ValueError(msg)

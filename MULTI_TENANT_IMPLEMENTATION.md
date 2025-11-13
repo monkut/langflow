@@ -76,16 +76,17 @@ cd deploy/multi-tenant
 - `src/backend/base/langflow/services/deps_tenant.py` - Tenant dependencies (126 lines)
 - `lfhelper.py` - CLI management tool (361 lines)
 
-**Docker & Deployment** (8 files):
-- `deploy/multi-tenant/Dockerfile` - Multi-stage production build
-- `deploy/multi-tenant/docker-compose.yml` - Full orchestration
+**Docker & Deployment** (7 files):
+- `deploy/multi-tenant/Dockerfile` - Multi-stage build (used for both local and production)
+- `deploy/multi-tenant/docker-compose.yml` - Local orchestration (uses same Dockerfile as production)
 - `deploy/multi-tenant/docker-compose.dev.yml` - Development config
-- `deploy/multi-tenant/nginx.conf` - Reverse proxy with routing
 - `deploy/multi-tenant/.env.example` - Configuration template
 - `deploy/multi-tenant/README.md` - Deployment guide
 - `deploy/multi-tenant/start.sh` - Automated startup
 - `deploy/multi-tenant/test-setup.sh` - Test automation
 - `deploy/multi-tenant/postgres-init/01-init.sql` - DB initialization
+
+**Note**: `nginx.conf` exists for reference but is not used in either local or production deployments
 
 **Documentation** (3 files):
 - `MULTI_TENANT_IMPLEMENTATION.md` - This technical guide
@@ -407,6 +408,32 @@ The infrastructure repository provides:
 - Step-by-step deployment guide with example commands
 - Schema and user management instructions using ECS Exec and `lfhelper.py`
 - Production-ready configuration with auto-scaling, health checks, and monitoring
+
+#### Docker Build
+
+The `deploy/multi-tenant/Dockerfile` is used for both local development and production deployment:
+
+**What's included**:
+- Langflow application with multi-tenant middleware
+- `lfhelper.py` CLI tool for tenant/user management
+- PostgreSQL client libraries
+- Frontend built assets
+
+**Configuration**:
+- **Port**: 7860 (Langflow application server)
+- **Command**: `langflow run`
+- **No nginx**: Runs Langflow directly
+
+**URL Routing**:
+- All tenant routing is handled by FastAPI middleware (middleware/tenant.py:46)
+- Middleware extracts tenant prefix from URL path `/tenant/{prefix}/...`
+- ALB/load balancers are unaware of multi-tenant implementation - they simply forward requests
+- Access pattern: `http://host/tenant/{prefix}/` (same for local and production)
+
+Build command:
+```bash
+docker build -f deploy/multi-tenant/Dockerfile -t langflow-multi-tenant:latest .
+```
 
 ## Security Features
 

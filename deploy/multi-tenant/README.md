@@ -63,10 +63,10 @@ python lfhelper.py user-add --schema acme-a1b2c3 --username john@acme.com
 
 ```bash
 # The tenant can now access Langflow at:
-http://localhost/tenant/acme/
+http://localhost:7860/tenant/acme/
 
-# Or with nginx on port 80:
-http://your-domain.com/tenant/acme/
+# In production with ALB:
+http://your-alb-url/tenant/acme/
 ```
 
 ## Helper Script Usage
@@ -192,6 +192,13 @@ langflow (database)
 ## Production Deployment
 
 ### AWS Fargate + Aurora Serverless
+
+**Important**: This Dockerfile runs Langflow directly (no nginx):
+- Exposes port 7860 (Langflow application server)
+- Tenant routing is handled by FastAPI middleware (middleware/tenant.py)
+- ALB/load balancers simply forward requests - they are unaware of multi-tenant implementation
+- Includes `lfhelper.py` for managing tenants via ECS Exec
+- Same configuration for both local and production environments
 
 1. **Build and push Docker image**:
    ```bash
