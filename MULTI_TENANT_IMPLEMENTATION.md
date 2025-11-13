@@ -536,6 +536,368 @@ docker-compose exec postgres psql -U langflow -d langflow -c \
   "SET search_path TO \"testco-XXXXXX\"; SELECT * FROM flow;"
 ```
 
+## File Storage & Persistence
+
+### Problem Statement
+
+**Current Issue**: File storage uses `user_id` as directory path:
+```
+/app/data/{user_id}/{filename}
+```
+
+**Risk**: Since UUID uniqueness is enforced per-schema (not globally), the same `user_id` can exist in different schemas:
+- Tenant A: User `abc-123-def` in schema `testco-0f6d5c`
+- Tenant B: User `abc-123-def` in schema `demolab-fbd49c`
+- Both write to: `/app/data/abc-123-def/` ❌ **COLLISION**
+
+### Schema-Based Directory Prefixing
+
+#### Target Structure
+```
+/app/data/{schema_name}/{user_id}/{filename}
+```
+
+**Example**:
+- Tenant A: `/app/data/testco-0f6d5c/abc-123-def/report.pdf`
+- Tenant B: `/app/data/demolab-fbd49c/abc-123-def/report.pdf`
+- ✅ **ISOLATED**
+
+#### Implementation Changes Required
+
+**1. Modify Storage Service Interface**
+
+**File**: `src/backend/base/langflow/services/storage/service.py`
+
+```python
+# Current
+async def save_file(self, flow_id: str, file_name: str, data) -> None:
+    raise NotImplementedError
+
+# Proposed
+async def save_file(self, flow_id: str, file_name: str, data, schema_name: str | None = None) -> None:
+    raise NotImplementedError
+```
+
+**Changes needed** in ALL abstract methods:
+- `save_file()`
+- `get_file()`
+- `list_files()`
+- `delete_file()`
+- `get_file_size()`
+- `build_full_path()`
+
+**2. Update LocalStorageService Implementation**
+
+**File**: `src/backend/base/langflow/services/storage/local.py`
+
+```python
+def build_full_path(self, flow_id: str, file_name: str, schema_name: str | None = None) -> str:
+    """Build the full path with schema prefix for multi-tenant isolation."""
+    if schema_name:
+        # Multi-tenant: /app/data/{schema}/{user_id}/{filename}
+        return str(self.data_dir / schema_name / flow_id / file_name)
+    else:
+        # Legacy/single-tenant: /app/data/{user_id}/{filename}
+        return str(self.data_dir / flow_id / file_name)
+
+async def save_file(self, flow_id: str, file_name: str, data: bytes, schema_name: str | None = None) -> None:
+    """Save a file with schema-based isolation."""
+    if schema_name:
+        folder_path = self.data_dir / schema_name / flow_id
+    else:
+        folder_path = self.data_dir / flow_id
+
+    await folder_path.mkdir(parents=True, exist_ok=True)
+    file_path = folder_path / file_name
+
+    # ... rest of implementation
+```
+
+**Apply similar changes to**:
+- `get_file()` - line 45-68
+- `list_files()` - line 70-97
+- `delete_file()` - line 99-111
+- `get_file_size()` - line 116-127
+
+**3. Update All Callers to Pass Schema Name**
+
+**File**: `src/backend/base/langflow/api/v2/files.py`
+
+**Current** (line 82):
+```python
+await storage_service.save_file(
+    flow_id=str(current_user.id),
+    file_name=file_name,
+    data=file_content
+)
+```
+
+**Proposed**:
+```python
+from typing import Annotated
+from fastapi import Depends, Request
+
+@router.post("", status_code=HTTPStatus.CREATED)
+async def upload_user_file(
+    file: Annotated[UploadFile, File(...)],
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
+    settings_service: Annotated[SettingsService, Depends(get_settings_service)],
+    request: Request,  # Add this
+) -> UploadFileResponse:
+    # Get tenant schema from request state (set by middleware)
+    schema_name = getattr(request.state, "tenant_schema", None)
+
+    # Save with schema prefix
+    await storage_service.save_file(
+        flow_id=str(current_user.id),
+        file_name=file_name,
+        data=file_content,
+        schema_name=schema_name  # Pass schema
+    )
+```
+
+**Other files requiring updates**:
+1. `src/backend/base/langflow/api/v2/files.py`
+   - `upload_user_file()` - line 89
+   - `download_file()` - line 130
+   - `list_files()` - line 175
+   - `delete_file()` - line 195
+
+2. `src/lfx/src/lfx/components/data/save_file.py`
+   - `_upload_file()` - line 277
+
+3. Any other component that calls storage service methods
+
+**4. Testing Strategy**
+
+**Test Cases**:
+1. Create same user_id in two different schemas
+2. Upload files from both users
+3. Verify files are in separate directories
+4. Verify cross-tenant file access is blocked
+5. Test backward compatibility (schema_name=None)
+
+**Test Script**:
+```python
+# Test multi-tenant file isolation
+testco_token = api_login("testco", "testuser1", "password")
+demolab_token = api_login("demolab", "demouser1", "password")
+
+# Upload file as testco user
+upload_file("testco", testco_token, "report.pdf")
+
+# Try to access as demolab user (should fail)
+try:
+    download_file("demolab", demolab_token, "report.pdf")
+    assert False, "Should not access testco file"
+except HTTPException as e:
+    assert e.status_code == 404  # File not found
+```
+
+### Data Persistence Recommendations
+
+#### Current State: Ephemeral Storage
+- Dockerfile creates `/app/data` without volumes
+- All files lost on container restart
+- ✅ Good for temporary cache/workspace
+- ❌ Bad for user-uploaded files, exports, attachments
+
+#### Persistence Options
+
+**Option 1: AWS S3 (RECOMMENDED for Fargate)**
+
+**Advantages**:
+- Serverless, no infrastructure management
+- Infinite scalability
+- Built-in multi-tenancy (use prefixes)
+- Versioning and lifecycle policies
+- Low cost for storage
+
+**Implementation**:
+```python
+# In storage/factory.py
+def create_storage_service():
+    storage_type = os.getenv("LANGFLOW_STORAGE_TYPE", "local")
+
+    if storage_type == "s3":
+        return S3StorageService(
+            bucket_name=os.getenv("LANGFLOW_S3_BUCKET"),
+            region=os.getenv("AWS_REGION", "ap-northeast-1")
+        )
+    return LocalStorageService(...)
+```
+
+**S3 Path Structure**:
+```
+s3://langflow-files-bucket/
+├── testco-0f6d5c/
+│   └── {user_id}/
+│       └── report.pdf
+└── demolab-fbd49c/
+    └── {user_id}/
+        └── invoice.pdf
+```
+
+**Environment Variables**:
+```bash
+LANGFLOW_STORAGE_TYPE=s3
+LANGFLOW_S3_BUCKET=langflow-be1bbb25-dev-files
+AWS_REGION=ap-northeast-1
+```
+
+**Fargate IAM Role**: Grant S3 permissions to task execution role
+
+**Cost Estimate**: ~$0.023/GB/month + $0.0004/1000 requests
+
+**Option 2: AWS EFS (Alternative for Fargate)**
+
+**Advantages**:
+- POSIX-compliant filesystem (drop-in replacement)
+- Shared across multiple Fargate tasks
+- Automatic scaling
+
+**Disadvantages**:
+- More expensive than S3 (~$0.30/GB/month)
+- Requires VPC configuration
+- Not as scalable as S3
+
+**Implementation**:
+1. Create EFS filesystem
+2. Mount to Fargate tasks at `/app/data`
+3. No code changes needed (uses LocalStorageService)
+
+**CloudFormation Addition**:
+```yaml
+EFSFileSystem:
+  Type: AWS::EFS::FileSystem
+  Properties:
+    PerformanceMode: generalPurpose
+    Encrypted: true
+
+MountTarget:
+  Type: AWS::EFS::MountTarget
+  Properties:
+    FileSystemId: !Ref EFSFileSystem
+    SubnetId: !Ref PrivateSubnet
+    SecurityGroups: [!Ref EFSSecurityGroup]
+```
+
+**Fargate Task Definition**:
+```json
+{
+  "volumes": [{
+    "name": "langflow-data",
+    "efsVolumeConfiguration": {
+      "fileSystemId": "fs-xxxxx",
+      "rootDirectory": "/langflow-data"
+    }
+  }],
+  "containerDefinitions": [{
+    "mountPoints": [{
+      "sourceVolume": "langflow-data",
+      "containerPath": "/app/data"
+    }]
+  }]
+}
+```
+
+**Option 3: Docker Volumes (Local Development Only)**
+
+**For docker-compose testing with persistence**:
+
+```yaml
+# deploy/multi-tenant/docker-compose.yml
+services:
+  langflow:
+    volumes:
+      - langflow-data:/app/data  # Add volume mount
+    # ... rest of config
+
+volumes:
+  langflow-data:
+    driver: local
+```
+
+**Not recommended for production**: Data tied to single host
+
+### Implementation Priority
+
+**Phase 1: Schema Prefixing (HIGH PRIORITY)**
+- **Why**: Security/isolation concern
+- **Timeline**: Implement before production launch
+- **Files to change**: ~4-5 files
+- **Testing**: Critical for multi-tenant validation
+
+**Phase 2: Persistence Strategy (MEDIUM PRIORITY)**
+- **Why**: User experience improvement
+- **Timeline**: Can deploy without (ephemeral is functional)
+- **Recommendation**: S3 for production
+- **Testing**: Upload/download/delete operations
+
+### Storage Migration Strategy
+
+If you already have data in production:
+
+**Option A: Fresh Start (If no critical data)**
+1. Deploy schema-prefixed version
+2. Old files in `/app/data/{user_id}/` are orphaned
+3. Files are ephemeral anyway (lost on restart)
+4. No migration needed
+
+**Option B: Data Migration (If critical data exists)**
+1. Deploy schema-prefixed version with migration script
+2. Script to move files:
+```python
+async def migrate_existing_files():
+    """Move files from /app/data/{user_id}/ to /app/data/{schema}/{user_id}/"""
+    for user in all_users:
+        old_path = f"/app/data/{user.id}"
+        new_path = f"/app/data/{user.schema_name}/{user.id}"
+        if os.path.exists(old_path):
+            shutil.move(old_path, new_path)
+```
+
+### Storage Decision Matrix
+
+| Requirement | Local (Ephemeral) | Local (Volume) | EFS | S3 |
+|------------|-------------------|----------------|-----|-----|
+| Multi-tenant isolation | ✅ (with prefix) | ✅ (with prefix) | ✅ (with prefix) | ✅ (native) |
+| Data persistence | ❌ | ✅ | ✅ | ✅ |
+| Fargate compatible | ✅ | ❌ | ✅ | ✅ |
+| Cost (monthly) | Free | N/A | ~$30 (100GB) | ~$2.30 (100GB) |
+| Scalability | N/A | Limited | Good | Excellent |
+| Implementation effort | Low | Low | Medium | Medium-High |
+| **Recommendation** | Testing only | Dev only | If POSIX needed | **PRODUCTION** |
+
+### Storage Implementation Checklist
+
+1. **Immediate**: Implement schema prefixing (Part 1)
+   - Modify storage service interface
+   - Update LocalStorageService
+   - Update file upload/download endpoints
+   - Test with local Docker
+
+2. **Short-term**: Choose persistence strategy
+   - Recommended: S3 for production
+   - Create S3 bucket with lifecycle policies
+   - Implement S3StorageService class
+   - Update Fargate IAM role
+
+3. **Before production**:
+   - Complete multi-tenant isolation testing
+   - Verify file access controls
+   - Test schema prefix isolation
+   - Document backup/recovery procedures
+
+### Storage Questions to Resolve
+
+1. **Immediate deployment tolerance**: Can you deploy with ephemeral storage initially?
+2. **Data criticality**: Are uploaded files business-critical or just temporary?
+3. **Budget considerations**: S3 ($2-5/month) vs EFS ($30+/month)?
+4. **Compliance requirements**: Any data residency or encryption requirements?
+
 ## Migration from Single-Tenant
 
 If you have existing Langflow data in the public schema:
